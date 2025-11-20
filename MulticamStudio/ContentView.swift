@@ -12,67 +12,88 @@ struct ContentView: View {
     @StateObject var connection = MultipeerSession()
     @StateObject var camera = CameraModel()
     
+    // 録画状態管理（Mac側用）
+    @State private var isRemoteRecording = false
+    
     var body: some View {
         VStack {
             #if targetEnvironment(macCatalyst)
             // ============================
-            //  Mac側の画面 (モニター)
+            //  Mac側の画面 (モニター & コントローラー)
             // ============================
             VStack(spacing: 20) {
                 Text("📡 Studio Monitor")
                     .font(.largeTitle)
                     .fontWeight(.bold)
                 
-                if let receivedImage = connection.receivedImage {
-                    Image(uiImage: receivedImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(height: 500)
-                        .cornerRadius(12)
-                        .overlay(
-                            VStack {
-                                HStack {
-                                    Spacer()
-                                    Text("LIVE")
-                                        .font(.caption)
-                                        .fontWeight(.bold)
-                                        .padding(6)
-                                        .background(Color.red)
-                                        .foregroundColor(.white)
-                                        .cornerRadius(4)
-                                }
+                // 映像表示エリア
+                ZStack {
+                    if let receivedImage = connection.receivedImage {
+                        Image(uiImage: receivedImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(height: 500)
+                            .cornerRadius(12)
+                    } else {
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.black)
+                            .frame(height: 500)
+                            .overlay(Text("No Signal").foregroundColor(.white))
+                    }
+                    
+                    // 録画中マーク
+                    if isRemoteRecording {
+                        VStack {
+                            HStack {
+                                Circle().fill(Color.red).frame(width: 15, height: 15)
+                                Text("REC").foregroundColor(.red).fontWeight(.bold)
                                 Spacer()
                             }
                             .padding()
-                        )
-                } else {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color.gray.opacity(0.2))
-                            .frame(height: 400)
-                        
-                        VStack {
-                            Image(systemName: "video.slash")
-                                .font(.system(size: 50))
-                                .foregroundColor(.gray)
-                            Text("カメラ待機中...")
-                                .foregroundColor(.gray)
+                            Spacer()
                         }
                     }
                 }
                 
-                HStack {
-                    Image(systemName: connection.isConnected ? "wifi" : "wifi.slash")
-                    Text(connection.isConnected ? "接続済み: \(connection.connectedPeers.count)台" : "接続待ち...")
+                // 操作ボタンエリア
+                HStack(spacing: 40) {
+                    Button(action: {
+                        if isRemoteRecording {
+                            connection.sendCommand("STOP_REC")
+                            isRemoteRecording = false
+                        } else {
+                            connection.sendCommand("START_REC")
+                            isRemoteRecording = true
+                        }
+                    }) {
+                        ZStack {
+                            Circle()
+                                .fill(isRemoteRecording ? Color.gray : Color.red)
+                                .frame(width: 80, height: 80)
+                            
+                            if isRemoteRecording {
+                                Rectangle().fill(Color.white).frame(width: 30, height: 30)
+                            } else {
+                                Circle().fill(Color.white).frame(width: 70, height: 70)
+                                Circle().fill(Color.red).frame(width: 60, height: 60)
+                            }
+                        }
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    
+                    VStack(alignment: .leading) {
+                        Text("Remote Control")
+                            .font(.headline)
+                        Text(isRemoteRecording ? "Recording..." : "Ready")
+                            .foregroundColor(isRemoteRecording ? .red : .gray)
+                    }
                 }
                 .padding()
                 .background(Material.thinMaterial)
-                .cornerRadius(10)
+                .cornerRadius(16)
             }
             .padding()
-            .onAppear {
-                connection.startHosting() // Macはホストとして起動
-            }
+            .onAppear { connection.startHosting() }
             
             #else
             // ============================
@@ -83,36 +104,41 @@ struct ContentView: View {
                 
                 VStack {
                     Spacer()
-                    Image(systemName: "camera.fill")
-                        .font(.system(size: 60))
-                        .foregroundColor(.white)
-                        .padding()
-                    
-                    Text("Camera Mode Active")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                        .foregroundColor(.white)
-                    
-                    Text("レンズを向けてください")
-                        .foregroundColor(.gray)
-                    
-                    Spacer()
-                    
-                    HStack {
-                        Circle()
-                            .fill(connection.isConnected ? Color.green : Color.orange)
-                            .frame(width: 10, height: 10)
-                        Text(connection.isConnected ? "Monitor Connected" : "Searching Monitor...")
-                            .foregroundColor(.white)
-                            .font(.caption)
+                    if camera.isRecording {
+                        Text("🔴 REC")
+                            .font(.system(size: 40, weight: .bold))
+                            .foregroundColor(.red)
+                            .padding()
+                    } else {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 60))
+                            .foregroundColor(.white.opacity(0.5))
                     }
-                    .padding(.bottom, 40)
+                    Spacer()
+                }
+                
+                VStack {
+                    Spacer()
+                    Text(connection.isConnected ? "Connected" : "Connecting...")
+                        .foregroundColor(connection.isConnected ? .green : .yellow)
+                        .padding(.bottom, 40)
                 }
             }
             .onAppear {
                 camera.multipeerSession = connection
-                camera.start()      // カメラ起動
-                connection.startJoining() // 通信参加
+                camera.start()
+                connection.startJoining()
+                
+                // コマンド受信の監視
+                NotificationCenter.default.addObserver(forName: NSNotification.Name("ReceivedCommand"), object: nil, queue: .main) { notification in
+                    if let command = notification.userInfo?["command"] as? String {
+                        if command == "START_REC" {
+                            camera.startRecording()
+                        } else if command == "STOP_REC" {
+                            camera.stopRecording()
+                        }
+                    }
+                }
             }
             #endif
         }

@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>録画した動画を保存するために使用します。</string>
 	<key>NSCameraUsageDescription</key>
 	<string>撮影に使用します。</string>
 	<key>NSLocalNetworkUsageDescription</key>
@@ -10,8 +12,8 @@
 	<string>マイクを使用します。</string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_studio._tcp</string>
-		<string>_studio._udp</string>
+		<string>_multicamstudio._tcp</string>
+		<string>_multicamstudio._udp</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array/>

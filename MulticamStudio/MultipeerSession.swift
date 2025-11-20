@@ -11,7 +11,7 @@ import Combine // ← これを追加！
 
 class MultipeerSession: NSObject, ObservableObject {
     // ... 以下は変更なし ...
-    private let serviceType = "studio"
+    private let serviceType = "multicamstudio"
     private let myPeerId: MCPeerID = {
         #if targetEnvironment(macCatalyst)
         let hostName = ProcessInfo.processInfo.hostName
@@ -31,7 +31,8 @@ class MultipeerSession: NSObject, ObservableObject {
     @Published var isConnected: Bool = false
 
     override init() {
-        self.session = MCSession(peer: myPeerId, securityIdentity: nil, encryptionPreference: .optional)
+        // 接続速度を改善するため、none に設定
+        self.session = MCSession(peer: myPeerId, securityIdentity: nil, encryptionPreference: .none)
         self.serviceAdvertiser = MCNearbyServiceAdvertiser(peer: myPeerId, discoveryInfo: nil, serviceType: serviceType)
         self.serviceBrowser = MCNearbyServiceBrowser(peer: myPeerId, serviceType: serviceType)
 
@@ -45,15 +46,29 @@ class MultipeerSession: NSObject, ObservableObject {
     }
     
     func startHosting() {
-        print("🔵 Mac: Starting hosting - browsing for peers and advertising")
+        print("🔵 Mac: Starting hosting")
+        print("   Service Type: \(serviceType)")
+        print("   Peer ID: \(myPeerId.displayName)")
+
+        // 先にブラウジングを開始
         serviceBrowser.startBrowsingForPeers()
-        serviceAdvertiser.startAdvertisingPeer()
+        // 少し遅延させてからアドバタイズを開始
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.serviceAdvertiser.startAdvertisingPeer()
+        }
     }
 
     func startJoining() {
-        print("📱 iPhone: Starting joining - advertising and browsing")
+        print("📱 iPhone: Starting joining")
+        print("   Service Type: \(serviceType)")
+        print("   Peer ID: \(myPeerId.displayName)")
+
+        // 先にアドバタイズを開始
         serviceAdvertiser.startAdvertisingPeer()
-        serviceBrowser.startBrowsingForPeers()
+        // 少し遅延させてからブラウジングを開始
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.serviceBrowser.startBrowsingForPeers()
+        }
     }
     
     func send(data: Data) {
@@ -87,13 +102,38 @@ extension MultipeerSession: MCSessionDelegate {
         }
     }
     
+    // 受信時の処理を改造
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
+        // 1. まず画像として変換を試みる
         if let image = UIImage(data: data) {
             DispatchQueue.main.async {
                 self.receivedImage = image
             }
+            return // 画像だったらここで終了
+        }
+        
+        // 2. 画像じゃなければ、文字（コマンド）として解読を試みる
+        if let command = String(data: data, encoding: .utf8) {
+            DispatchQueue.main.async {
+                // コマンド受信時の通知を送る（ContentViewで受け取るため）
+                NotificationCenter.default.post(name: NSNotification.Name("ReceivedCommand"), object: nil, userInfo: ["command": command])
+                print("📩 コマンド受信: \(command)")
+            }
         }
     }
+    
+    // 文字（コマンド）を送る専用メソッド
+        func sendCommand(_ text: String) {
+            guard !session.connectedPeers.isEmpty else { return }
+            if let data = text.data(using: .utf8) {
+                do {
+                    // コマンドは重要なので .reliable (確実に届くモード) で送る
+                    try session.send(data, toPeers: session.connectedPeers, with: .reliable)
+                } catch {
+                    print("Error sending command: \(error.localizedDescription)")
+                }
+            }
+        }
     
     func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) {}
     func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {}
@@ -115,15 +155,18 @@ extension MultipeerSession: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String : String]?) {
         print("✅ Found peer: \(peerID.displayName)")
 
-        // 既に接続済みまたは招待済みの場合はスキップ
-        guard !session.connectedPeers.contains(peerID) && !invitedPeers.contains(peerID) else {
-            print("⏭️ Skipping invitation - already connected or invited: \(peerID.displayName)")
+        // 既に接続済みの場合はスキップ
+        guard !session.connectedPeers.contains(peerID) else {
+            print("⏭️ Already connected to: \(peerID.displayName)")
             return
         }
 
-        invitedPeers.insert(peerID)
-        print("📤 Inviting peer: \(peerID.displayName)")
-        browser.invitePeer(peerID, to: self.session, withContext: nil, timeout: 30)
+        // 招待済みでも一定時間経過後は再試行
+        if !invitedPeers.contains(peerID) {
+            invitedPeers.insert(peerID)
+            print("📤 Inviting peer: \(peerID.displayName)")
+            browser.invitePeer(peerID, to: self.session, withContext: nil, timeout: 10)
+        }
     }
 
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
