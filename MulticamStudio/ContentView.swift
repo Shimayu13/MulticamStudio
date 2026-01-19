@@ -5,6 +5,7 @@
 //  Created by Yuki Shimazu on 2025/11/20.
 //
 
+import AVFoundation
 import MultipeerConnectivity
 import SwiftUI
 
@@ -14,6 +15,19 @@ struct ContentView: View {
     
     // 録画状態管理（Mac側用）
     @State private var isRemoteRecording = false
+
+    private var hasFrontCamera: Bool {
+        camera.availableLenses.contains { $0.position == .front }
+    }
+
+    private var hasBackCamera: Bool {
+        camera.availableLenses.contains { $0.position == .back }
+    }
+
+    private var visibleLenses: [CameraLens] {
+        let position = camera.isFrontCamera ? AVCaptureDevice.Position.front : .back
+        return camera.availableLenses.filter { $0.position == position }.sorted { $0.zoomFactor < $1.zoomFactor }
+    }
     
     private var gridColumns: [GridItem] {
         [GridItem(.adaptive(minimum: 240), spacing: 16)]
@@ -131,7 +145,6 @@ struct ContentView: View {
                                 }
                         )
                         .onTapGesture { location in
-                            // タップ位置を0-1の範囲に正規化
                             let screenSize = UIScreen.main.bounds.size
                             let point = CGPoint(
                                 x: location.x / screenSize.width,
@@ -143,8 +156,8 @@ struct ContentView: View {
 
                 // オーバーレイUI
                 VStack {
+                    // 上部: ズーム・録画インジケーター
                     HStack {
-                        // ズームインジケーター
                         Text(String(format: "%.1fx", camera.zoomFactor))
                             .font(.caption)
                             .padding(8)
@@ -154,7 +167,6 @@ struct ContentView: View {
 
                         Spacer()
 
-                        // 録画インジケーター
                         if camera.isRecording {
                             HStack {
                                 Circle().fill(Color.red).frame(width: 12, height: 12)
@@ -171,29 +183,91 @@ struct ContentView: View {
 
                     Spacer()
 
-                    // 接続状態
-                    HStack {
-                        Circle()
-                            .fill(connection.isConnected ? Color.green : Color.yellow)
-                            .frame(width: 8, height: 8)
-                        Text(connection.isConnected ? "Connected" : "Connecting...")
-                            .font(.caption)
+                    // 下部: カメラコントロール
+                    VStack(spacing: 12) {
+                        // ズームスライダー
+                        HStack(spacing: 12) {
+                            Text("1x")
+                                .font(.caption2)
+                                .foregroundColor(.white)
+                            Slider(
+                                value: Binding(
+                                    get: { camera.zoomFactor },
+                                    set: { camera.setZoom($0) }
+                                ),
+                                in: camera.minZoom...camera.maxZoom
+                            )
+                            .accentColor(.yellow)
+                            Text(String(format: "%.0fx", camera.maxZoom))
+                                .font(.caption2)
+                                .foregroundColor(.white)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                        .background(Material.ultraThin)
+                        .cornerRadius(20)
+                        .padding(.horizontal, 16)
+
+                        // レンズ切り替えボタン（前面カメラ含む全てのレンズ）
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 10) {
+                                if hasFrontCamera && hasBackCamera {
+                                    Button(action: {
+                                        camera.toggleCameraPosition()
+                                    }) {
+                                        VStack(spacing: 4) {
+                                            Image(systemName: "arrow.triangle.2.circlepath.camera")
+                                                .font(.system(size: 16, weight: .bold))
+                                            Text(camera.isFrontCamera ? "背面" : "前面")
+                                                .font(.system(size: 10))
+                                        }
+                                        .foregroundColor(.white)
+                                        .frame(width: 56, height: 56)
+                                        .background(Color.black.opacity(0.6))
+                                        .clipShape(Circle())
+                                    }
+                                }
+
+                                ForEach(visibleLenses) { lens in
+                                    Button(action: {
+                                        camera.switchToLens(lens)
+                                    }) {
+                                        VStack(spacing: 4) {
+                                            Text(lensLabel(lens))
+                                                .font(.system(size: 14, weight: .bold))
+                                            Text(lens.name)
+                                                .font(.system(size: 10))
+                                        }
+                                        .foregroundColor(camera.currentLens == lens ? .black : .white)
+                                        .frame(width: 56, height: 56)
+                                        .background(camera.currentLens == lens ? Color.yellow : Color.black.opacity(0.6))
+                                        .clipShape(Circle())
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+
+                        // 接続状態
+                        HStack {
+                            Circle()
+                                .fill(connection.isConnected ? Color.green : Color.yellow)
+                                .frame(width: 8, height: 8)
+                            Text(connection.isConnected ? "Connected" : "Connecting...")
+                                .font(.caption)
+                        }
+                        .padding(8)
+                        .background(Material.ultraThin)
+                        .cornerRadius(8)
                     }
-                    .padding(8)
-                    .background(Material.ultraThin)
-                    .cornerRadius(8)
                     .padding(.bottom, 40)
                 }
-
-                // タップフォーカスのビジュアルフィードバック（オプション）
-                // 必要に応じて追加可能
             }
             .onAppear {
                 camera.multipeerSession = connection
                 camera.start()
                 connection.startJoining()
 
-                // コマンド受信の監視
                 NotificationCenter.default.addObserver(forName: NSNotification.Name("ReceivedCommand"), object: nil, queue: .main) { notification in
                     if let command = notification.userInfo?["command"] as? String {
                         if command == "START_REC" {
@@ -206,6 +280,15 @@ struct ContentView: View {
             }
             #endif
         }
+    }
+}
+
+// レンズのラベルを生成
+private func lensLabel(_ lens: CameraLens) -> String {
+    if lens.zoomFactor < 1.0 || lens.zoomFactor.rounded() != lens.zoomFactor {
+        return String(format: "%.1fx", lens.zoomFactor)
+    } else {
+        return "\(Int(lens.zoomFactor))x"
     }
 }
 
