@@ -12,8 +12,8 @@
 	<string>マイクを使用します。</string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_multicamstudio._tcp</string>
-		<string>_multicamstudio._udp</string>
+		<string>_mstdcam._tcp</string>
+		<string>_mstdcam._udp</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array/>

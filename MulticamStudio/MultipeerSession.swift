@@ -7,11 +7,25 @@
 
 import MultipeerConnectivity
 import SwiftUI
-import Combine // ← これを追加！
+import Combine
+
+// 各ピアのフレームを独立して管理するクラス
+// ObservableObjectにすることで、個別のピアの更新が他のピアに影響しない
+class PeerFrame: ObservableObject, Identifiable {
+    let id: String
+    let name: String
+    @Published var image: UIImage
+
+    init(id: String, name: String, image: UIImage) {
+        self.id = id
+        self.name = name
+        self.image = image
+    }
+}
 
 class MultipeerSession: NSObject, ObservableObject {
-    // ... 以下は変更なし ...
-    private let serviceType = "multicamstudio"
+    // サービス名は15文字以内・小文字英数字・ハイフンのみ
+    private let serviceType = "mstdcam" // 7文字の安全なサービス名
     private let myPeerId: MCPeerID = {
         #if targetEnvironment(macCatalyst)
         let hostName = ProcessInfo.processInfo.hostName
@@ -26,7 +40,10 @@ class MultipeerSession: NSObject, ObservableObject {
     private let session: MCSession
     private var invitedPeers = Set<MCPeerID>()
 
-    @Published var receivedImage: UIImage? = nil
+    // 辞書で各ピアのフレームを管理（MCPeerIDをキーにして確実に区別）
+    private var peerFrameDict: [MCPeerID: PeerFrame] = [:]
+    // 配列は新規ピア追加時のみ更新（ForEach用）
+    @Published var peerFrames: [PeerFrame] = []
     @Published var connectedPeers: [MCPeerID] = []
     @Published var isConnected: Bool = false
 
@@ -43,32 +60,28 @@ class MultipeerSession: NSObject, ObservableObject {
         self.serviceBrowser.delegate = self
 
         print("🆔 Initialized MultipeerSession with Peer ID: \(myPeerId.displayName)")
+        assert(serviceType.count <= 15, "serviceType must be <= 15 chars")
     }
     
+    // Mac側: 広告のみ（ホスト）に徹する
     func startHosting() {
-        print("🔵 Mac: Starting hosting")
+        print("🔵 Mac: Starting hosting (advertise only)")
         print("   Service Type: \(serviceType)")
         print("   Peer ID: \(myPeerId.displayName)")
 
-        // 先にブラウジングを開始
-        serviceBrowser.startBrowsingForPeers()
-        // 少し遅延させてからアドバタイズを開始
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.serviceAdvertiser.startAdvertisingPeer()
-        }
+        serviceBrowser.stopBrowsingForPeers()
+        serviceAdvertiser.startAdvertisingPeer()
     }
 
+    // iPhone/iPad側: ブラウズのみ（クライアント）に徹する
     func startJoining() {
-        print("📱 iPhone: Starting joining")
+        print("📱 iPhone: Starting joining (browse only)")
         print("   Service Type: \(serviceType)")
         print("   Peer ID: \(myPeerId.displayName)")
 
-        // 先にアドバタイズを開始
-        serviceAdvertiser.startAdvertisingPeer()
-        // 少し遅延させてからブラウジングを開始
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.serviceBrowser.startBrowsingForPeers()
-        }
+        serviceAdvertiser.stopAdvertisingPeer()
+        invitedPeers.removeAll()
+        serviceBrowser.startBrowsingForPeers()
     }
     
     func send(data: Data) {
@@ -89,13 +102,18 @@ extension MultipeerSession: MCSessionDelegate {
 
             switch state {
             case .connected:
-                print("🟢 Connected to: \(peerID.displayName)")
+                print("🟢 Connected to: \(peerID.displayName) (hash: \(peerID.hash))")
+                print("   接続中のピア数: \(session.connectedPeers.count)")
                 self.invitedPeers.remove(peerID)
             case .connecting:
                 print("🟡 Connecting to: \(peerID.displayName)")
             case .notConnected:
                 print("🔴 Disconnected from: \(peerID.displayName)")
                 self.invitedPeers.remove(peerID)
+                // 辞書と配列の両方から削除（MCPeerIDのハッシュ値でIDを生成）
+                let frameId = "\(peerID.displayName)_\(peerID.hash)"
+                self.peerFrameDict.removeValue(forKey: peerID)
+                self.peerFrames.removeAll { $0.id == frameId }
             @unknown default:
                 break
             }
@@ -107,7 +125,7 @@ extension MultipeerSession: MCSessionDelegate {
         // 1. まず画像として変換を試みる
         if let image = UIImage(data: data) {
             DispatchQueue.main.async {
-                self.receivedImage = image
+                self.upsertFrame(for: peerID, image: image)
             }
             return // 画像だったらここで終了
         }
@@ -123,17 +141,17 @@ extension MultipeerSession: MCSessionDelegate {
     }
     
     // 文字（コマンド）を送る専用メソッド
-        func sendCommand(_ text: String) {
-            guard !session.connectedPeers.isEmpty else { return }
-            if let data = text.data(using: .utf8) {
-                do {
-                    // コマンドは重要なので .reliable (確実に届くモード) で送る
-                    try session.send(data, toPeers: session.connectedPeers, with: .reliable)
-                } catch {
-                    print("Error sending command: \(error.localizedDescription)")
-                }
+    func sendCommand(_ text: String) {
+        guard !session.connectedPeers.isEmpty else { return }
+        if let data = text.data(using: .utf8) {
+            do {
+                // コマンドは重要なので .reliable (確実に届くモード) で送る
+                try session.send(data, toPeers: session.connectedPeers, with: .reliable)
+            } catch {
+                print("Error sending command: \(error.localizedDescription)")
             }
         }
+    }
     
     func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) {}
     func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {}
@@ -172,5 +190,25 @@ extension MultipeerSession: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
         print("❌ Lost peer: \(peerID.displayName)")
         invitedPeers.remove(peerID)
+    }
+}
+
+// MARK: - Helpers
+private extension MultipeerSession {
+    func upsertFrame(for peer: MCPeerID, image: UIImage) {
+        // MCPeerIDをキーにして確実にピアを区別
+        // 同じdisplayNameでも異なるMCPeerIDオブジェクトは別々に扱われる
+        if let existingFrame = peerFrameDict[peer] {
+            // 既存のピアの場合: PeerFrame内部で画像を更新（配列は変更しない）
+            existingFrame.image = image
+        } else {
+            // 新しいピアの場合: 一意のIDを生成して辞書と配列に追加
+            let uniqueId = "\(peer.displayName)_\(peer.hash)"
+            let frame = PeerFrame(id: uniqueId, name: peer.displayName, image: image)
+            peerFrameDict[peer] = frame
+            peerFrames.append(frame)
+            print("📺 新しいカメラを追加: \(peer.displayName) (ID: \(uniqueId))")
+            print("   現在のカメラ数: \(peerFrames.count)")
+        }
     }
 }

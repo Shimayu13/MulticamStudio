@@ -14,18 +14,24 @@ class CameraModel: NSObject, ObservableObject {
     private let captureSession = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
-    
+    private var videoDevice: AVCaptureDevice?
+    private var lastSentAt: TimeInterval = 0
+    private let sendInterval: TimeInterval = 1.0 / 12.0 // 約12fpsで送信して帯域を安定化
+
     var multipeerSession: MultipeerSession?
     @Published var isRecording = false
+    @Published var zoomFactor: CGFloat = 1.0
+    @Published var previewLayer: AVCaptureVideoPreviewLayer?
     
     override init() {
         super.init()
         setupCamera()
     }
     
+    
     func setupCamera() {
-        captureSession.sessionPreset = .high
-        
+        captureSession.sessionPreset = .medium
+
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playAndRecord, options: [.allowBluetooth, .defaultToSpeaker])
@@ -34,22 +40,32 @@ class CameraModel: NSObject, ObservableObject {
             print("Audio Setup Error: \(error)")
         }
 
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let videoInput = try? AVCaptureDeviceInput(device: videoDevice) else { return }
-        
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+              let videoInput = try? AVCaptureDeviceInput(device: device) else { return }
+
+        self.videoDevice = device
+
         guard let audioDevice = AVCaptureDevice.default(for: .audio),
               let audioInput = try? AVCaptureDeviceInput(device: audioDevice) else { return }
 
         if captureSession.canAddInput(videoInput) { captureSession.addInput(videoInput) }
         if captureSession.canAddInput(audioInput) { captureSession.addInput(audioInput) }
-        
+
         videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+        videoOutput.alwaysDiscardsLateVideoFrames = true
         if let connection = videoOutput.connection(with: .video) {
             connection.videoOrientation = .portrait
         }
         if captureSession.canAddOutput(videoOutput) { captureSession.addOutput(videoOutput) }
-        
+
         if captureSession.canAddOutput(movieOutput) { captureSession.addOutput(movieOutput) }
+
+        // プレビューレイヤーを作成
+        let preview = AVCaptureVideoPreviewLayer(session: captureSession)
+        preview.videoGravity = .resizeAspectFill
+        DispatchQueue.main.async {
+            self.previewLayer = preview
+        }
     }
     
     func start() {
@@ -75,6 +91,49 @@ class CameraModel: NSObject, ObservableObject {
         movieOutput.stopRecording()
         DispatchQueue.main.async { self.isRecording = false }
         print("⏹️ 録画停止")
+    }
+
+    // ズーム機能
+    func setZoom(_ factor: CGFloat) {
+        guard let device = videoDevice else { return }
+
+        do {
+            try device.lockForConfiguration()
+            let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 10.0)
+            let zoom = max(1.0, min(factor, maxZoom))
+            device.videoZoomFactor = zoom
+
+            DispatchQueue.main.async {
+                self.zoomFactor = zoom
+            }
+            device.unlockForConfiguration()
+        } catch {
+            print("Zoom error: \(error)")
+        }
+    }
+
+    // タップフォーカス機能
+    func focus(at point: CGPoint) {
+        guard let device = videoDevice else { return }
+
+        do {
+            try device.lockForConfiguration()
+
+            if device.isFocusPointOfInterestSupported && device.isFocusModeSupported(.autoFocus) {
+                device.focusPointOfInterest = point
+                device.focusMode = .autoFocus
+            }
+
+            if device.isExposurePointOfInterestSupported && device.isExposureModeSupported(.autoExpose) {
+                device.exposurePointOfInterest = point
+                device.exposureMode = .autoExpose
+            }
+
+            device.unlockForConfiguration()
+            print("📍 Focus at: \(point)")
+        } catch {
+            print("Focus error: \(error)")
+        }
     }
 }
 
@@ -104,7 +163,12 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         
         if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
             let uiImage = UIImage(cgImage: cgImage)
-            if let data = uiImage.jpegData(compressionQuality: 0.2) {
+            let now = CACurrentMediaTime()
+            guard now - lastSentAt >= sendInterval else { return } // 送信頻度を制御
+            lastSentAt = now
+
+            if multipeerSession?.isConnected == true,
+               let data = uiImage.jpegData(compressionQuality: 0.2) {
                 multipeerSession?.send(data: data)
             }
         }
