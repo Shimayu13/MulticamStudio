@@ -46,6 +46,7 @@ class CameraModel: NSObject, ObservableObject {
     @Published var zoomPresets: [CGFloat] = [1.0]
     @Published var minZoom: CGFloat = 1.0
     @Published var maxZoom: CGFloat = 10.0
+    @Published var contentRotationDegrees: Double = 0
 
     override init() {
         super.init()
@@ -57,32 +58,46 @@ class CameraModel: NSObject, ObservableObject {
     // 利用可能なカメラを検出
     private func discoverCameras() {
         var lenses: [CameraLens] = []
+        let backVirtualDevice = preferredBackVirtualDevice()
 
-        // 背面カメラを検出
-        let backDeviceTypes: [AVCaptureDevice.DeviceType] = [
-            .builtInUltraWideCamera,  // 0.5x
-            .builtInWideAngleCamera,   // 1x
-            .builtInTelephotoCamera    // 2x or 3x or 5x
-        ]
+        if let virtualBack = backVirtualDevice {
+            let zoomFactors = backZoomFactors(for: virtualBack)
+            for zoom in zoomFactors.sorted() {
+                lenses.append(CameraLens(
+                    id: "\(virtualBack.uniqueID)-\(zoom)",
+                    device: virtualBack,
+                    name: backLensName(for: zoom),
+                    position: .back,
+                    zoomFactor: zoom
+                ))
+            }
+        } else {
+            // 背面カメラを検出（フォールバック）
+            let backDeviceTypes: [AVCaptureDevice.DeviceType] = [
+                .builtInUltraWideCamera,  // 0.5x
+                .builtInWideAngleCamera,   // 1x
+                .builtInTelephotoCamera    // 2x or 3x or 5x
+            ]
 
-        let backDiscovery = AVCaptureDevice.DiscoverySession(
-            deviceTypes: backDeviceTypes,
-            mediaType: .video,
-            position: .back
-        )
+            let backDiscovery = AVCaptureDevice.DiscoverySession(
+                deviceTypes: backDeviceTypes,
+                mediaType: .video,
+                position: .back
+            )
 
-        let wideBackDevice = backDiscovery.devices.first { $0.deviceType == .builtInWideAngleCamera }
-        let wideBackFOV = wideBackDevice?.activeFormat.videoFieldOfView
+            let wideBackDevice = backDiscovery.devices.first { $0.deviceType == .builtInWideAngleCamera }
+            let wideBackFOV = wideBackDevice?.activeFormat.videoFieldOfView
 
-        for device in backDiscovery.devices {
-            let (name, zoom) = cameraNameAndZoom(for: device, wideFOV: wideBackFOV)
-            lenses.append(CameraLens(
-                id: device.uniqueID,
-                device: device,
-                name: name,
-                position: .back,
-                zoomFactor: zoom
-            ))
+            for device in backDiscovery.devices {
+                let (name, zoom) = cameraNameAndZoom(for: device, wideFOV: wideBackFOV)
+                lenses.append(CameraLens(
+                    id: "\(device.uniqueID)-\(zoom)",
+                    device: device,
+                    name: name,
+                    position: .back,
+                    zoomFactor: zoom
+                ))
+            }
         }
 
         // 前面カメラを検出
@@ -103,11 +118,10 @@ class CameraModel: NSObject, ObservableObject {
     private func cameraNameAndZoom(for device: AVCaptureDevice, wideFOV: Float?) -> (String, CGFloat) {
         switch device.deviceType {
         case .builtInUltraWideCamera:
-            return ("超広角", estimatedZoomFactor(for: device, wideFOV: wideFOV))
+            return ("超広角", 0.5)
         case .builtInWideAngleCamera:
             return ("広角", 1.0)
         case .builtInTelephotoCamera:
-            // 望遠の倍率はデバイスによって異なるためFOVから推定
             return ("望遠", estimatedZoomFactor(for: device, wideFOV: wideFOV))
         default:
             return ("カメラ", estimatedZoomFactor(for: device, wideFOV: wideFOV))
@@ -130,6 +144,62 @@ class CameraModel: NSObject, ObservableObject {
             return nearest
         }
         return (value * 10).rounded() / 10
+    }
+
+    private func preferredBackVirtualDevice() -> AVCaptureDevice? {
+        let virtualTypes: [AVCaptureDevice.DeviceType] = [
+            .builtInTripleCamera,
+            .builtInDualCamera,
+            .builtInDualWideCamera
+        ]
+
+        for deviceType in virtualTypes {
+            if let device = AVCaptureDevice.default(deviceType, for: .video, position: .back) {
+                return device
+            }
+        }
+
+        return nil
+    }
+
+    private func backZoomFactors(for device: AVCaptureDevice) -> [CGFloat] {
+        var factors = Set<CGFloat>([1.0])
+
+        if device.isVirtualDevice {
+            let constituents = device.constituentDevices
+            if constituents.contains(where: { $0.deviceType == .builtInUltraWideCamera }) {
+                factors.insert(0.5)
+            }
+
+            let switchOver = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
+            var addedTele = false
+            for zoom in switchOver where zoom > 1.0 {
+                factors.insert(zoom)
+                addedTele = true
+            }
+
+            if !addedTele, let wideDevice = constituents.first(where: { $0.deviceType == .builtInWideAngleCamera }) {
+                let wideFOV = wideDevice.activeFormat.videoFieldOfView
+                for teleDevice in constituents where teleDevice.deviceType == .builtInTelephotoCamera {
+                    let zoom = estimatedZoomFactor(for: teleDevice, wideFOV: wideFOV)
+                    if zoom > 1.0 {
+                        factors.insert(zoom)
+                    }
+                }
+            }
+        }
+
+        return Array(factors)
+    }
+
+    private func backLensName(for zoom: CGFloat) -> String {
+        if zoom < 1.0 {
+            return "超広角"
+        }
+        if abs(zoom - 1.0) < 0.01 {
+            return "広角"
+        }
+        return "望遠"
     }
 
     func setupCamera() {
@@ -240,36 +310,86 @@ class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    private func rotationDegrees(for deviceOrientation: UIDeviceOrientation) -> Double? {
+        switch deviceOrientation {
+        case .portrait:
+            return 0
+        case .portraitUpsideDown:
+            return 180
+        case .landscapeLeft:
+            return -90
+        case .landscapeRight:
+            return 90
+        default:
+            return nil
+        }
+    }
+
+    private func rotationDegrees(for interfaceOrientation: UIInterfaceOrientation) -> Double {
+        switch interfaceOrientation {
+        case .portrait:
+            return 0
+        case .portraitUpsideDown:
+            return 180
+        case .landscapeLeft:
+            return -90
+        case .landscapeRight:
+            return 90
+        default:
+            return 0
+        }
+    }
+
     // ビデオ出力の向きを更新
     func updateVideoOrientation() {
         let deviceOrientation = UIDevice.current.orientation
-        let videoOrientation = videoOrientation(from: deviceOrientation)
-            ?? videoOrientation(from: currentInterfaceOrientation())
+        let interfaceOrientation = currentInterfaceOrientation()
+        let currentVideoOrientation = videoOrientation(from: deviceOrientation)
+            ?? videoOrientation(from: interfaceOrientation)
 
         // videoOutputの接続を更新
         if let connection = videoOutput.connection(with: .video) {
             if connection.isVideoOrientationSupported {
-                connection.videoOrientation = videoOrientation
+                connection.videoOrientation = currentVideoOrientation
             }
         }
 
         // movieOutputの接続も更新
         if let connection = movieOutput.connection(with: .video) {
             if connection.isVideoOrientationSupported {
-                connection.videoOrientation = videoOrientation
+                connection.videoOrientation = currentVideoOrientation
             }
         }
 
         if let connection = previewLayer?.connection, connection.isVideoOrientationSupported {
-            connection.videoOrientation = videoOrientation
+            connection.videoOrientation = currentVideoOrientation
         }
 
-        print("📐 向き更新: \(videoOrientation.rawValue)")
+        if let deviceDegrees = rotationDegrees(for: deviceOrientation) {
+            let interfaceDegrees = rotationDegrees(for: interfaceOrientation)
+            let delta = deviceDegrees - interfaceDegrees
+            DispatchQueue.main.async {
+                self.contentRotationDegrees = delta
+            }
+        } else {
+            DispatchQueue.main.async {
+                self.contentRotationDegrees = 0
+            }
+        }
+
+        print("📐 向き更新: \(currentVideoOrientation.rawValue)")
     }
 
     // カメラを切り替え
     func switchToLens(_ lens: CameraLens) {
         guard lens != currentLens else { return }
+
+        if let currentDevice = videoDevice, currentDevice.uniqueID == lens.device.uniqueID {
+            self.currentLens = lens
+            setZoom(lens.zoomFactor)
+            print("📷 ズーム切り替え: \(lens.name) \(lens.zoomFactor)x")
+            return
+        }
 
         captureSession.beginConfiguration()
 
@@ -302,6 +422,7 @@ class CameraModel: NSObject, ObservableObject {
         captureSession.commitConfiguration()
         updateVideoOrientation()
         setZoom(1.0)
+        setZoom(lens.zoomFactor)
 
         print("📷 カメラ切り替え: \(lens.name)")
     }
@@ -317,14 +438,18 @@ class CameraModel: NSObject, ObservableObject {
 
     // ズームプリセットを更新
     private func updateZoomPresets(for device: AVCaptureDevice) {
-        var presets: [CGFloat] = [1.0]
+        var presets: [CGFloat] = []
 
-        let maxZoomFactor = min(device.activeFormat.videoMaxZoomFactor, 10.0)
-        self.minZoom = 1.0
+        let maxZoomFactor = min(device.maxAvailableVideoZoomFactor, 10.0)
+        let minZoomFactor = max(0.5, device.minAvailableVideoZoomFactor)
+        self.minZoom = minZoomFactor
         self.maxZoom = maxZoomFactor
 
         // 利用可能な倍率を追加
+        if minZoomFactor <= 0.5 { presets.append(0.5) }
+        presets.append(1.0)
         if maxZoomFactor >= 2.0 { presets.append(2.0) }
+        if maxZoomFactor >= 3.0 { presets.append(3.0) }
         if maxZoomFactor >= 5.0 { presets.append(5.0) }
 
         DispatchQueue.main.async {
@@ -363,8 +488,9 @@ class CameraModel: NSObject, ObservableObject {
 
         do {
             try device.lockForConfiguration()
-            let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 10.0)
-            let zoom = max(1.0, min(factor, maxZoom))
+            let maxZoom = min(device.maxAvailableVideoZoomFactor, 10.0)
+            let minZoom = max(0.5, device.minAvailableVideoZoomFactor)
+            let zoom = max(minZoom, min(factor, maxZoom))
             device.videoZoomFactor = zoom
 
             DispatchQueue.main.async {
@@ -438,3 +564,4 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
     }
 }
+
