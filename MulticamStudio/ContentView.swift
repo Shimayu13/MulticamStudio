@@ -131,10 +131,14 @@ struct ContentView: View {
             // ============================
             GeometryReader { proxy in
                 let rotation = camera.contentRotationDegrees
-                let isQuarterTurn = abs(Int(rotation)) == 90
                 let baseSize = proxy.size
+                let isQuarterTurn = abs(Int(rotation)) == 90
                 let rotatedSize = isQuarterTurn ? CGSize(width: baseSize.height, height: baseSize.width) : baseSize
-                let scale = max(baseSize.width / rotatedSize.width, baseSize.height / rotatedSize.height)
+                let scale = min(1, min(baseSize.width / rotatedSize.width, baseSize.height / rotatedSize.height))
+                let scaledSize = CGSize(width: rotatedSize.width * scale, height: rotatedSize.height * scale)
+                let sideShift = max(0, (baseSize.width - scaledSize.width) / 2)
+                let rotationInt = Int(rotation.rounded())
+                let offsetX: CGFloat = rotationInt == 90 ? sideShift : (rotationInt == -90 ? -sideShift : 0)
 
                 ZStack {
                     Color.black.edgesIgnoringSafeArea(.all)
@@ -269,13 +273,12 @@ struct ContentView: View {
                         }
                         .padding(.bottom, 40)
                     }
+                    .frame(width: baseSize.width, height: baseSize.height, alignment: .bottom)
                     .rotationEffect(.degrees(rotation))
                     .scaleEffect(scale)
-                    .frame(width: baseSize.width, height: baseSize.height)
+                    .offset(x: offsetX, y: 0)
                     .animation(.easeInOut(duration: 0.15), value: rotation)
                 )
-                .frame(width: baseSize.width, height: baseSize.height)
-                .clipped()
             }
             .ignoresSafeArea()
             .onAppear {

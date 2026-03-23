@@ -47,6 +47,7 @@ class CameraModel: NSObject, ObservableObject {
     @Published var minZoom: CGFloat = 1.0
     @Published var maxZoom: CGFloat = 10.0
     @Published var contentRotationDegrees: Double = 0
+    @Published var interfaceRotationDegrees: Double = 0
 
     override init() {
         super.init()
@@ -365,16 +366,12 @@ class CameraModel: NSObject, ObservableObject {
             connection.videoOrientation = currentVideoOrientation
         }
 
-        if let deviceDegrees = rotationDegrees(for: deviceOrientation) {
-            let interfaceDegrees = rotationDegrees(for: interfaceOrientation)
-            let delta = deviceDegrees - interfaceDegrees
-            DispatchQueue.main.async {
-                self.contentRotationDegrees = delta
-            }
-        } else {
-            DispatchQueue.main.async {
-                self.contentRotationDegrees = 0
-            }
+        let deviceDegrees = rotationDegrees(for: deviceOrientation)
+        let interfaceDegrees = rotationDegrees(for: interfaceOrientation)
+        let rotation = deviceDegrees ?? interfaceDegrees
+        DispatchQueue.main.async {
+            self.contentRotationDegrees = rotation
+            self.interfaceRotationDegrees = interfaceDegrees
         }
 
         print("📐 向き更新: \(currentVideoOrientation.rawValue)")
@@ -564,4 +561,3 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
     }
 }
-
